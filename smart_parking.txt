@@ -1,0 +1,581 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ESP32Servo.h>
+
+const char* ssid = "Laxhya";
+const char* password = "123456789";
+
+WebServer server(80);
+
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_ADDR 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1
+);
+
+
+#define IR_IN 33
+#define IR_OUT 32
+
+
+#define SERVO_PIN 18
+#define BUZZER_PIN 23
+
+Servo gate;
+
+
+#define IR_ACTIVE_LOW true
+
+const int GATE_OPEN = 90;
+const int GATE_CLOSED = 0;
+const int MAX_CAPACITY = 2;
+
+const unsigned long DEBOUNCE_TIME = 300;
+const unsigned long GATE_OPEN_TIME = 3000;
+
+int occupiedCars = 0;
+
+bool gateOpen = false;
+
+bool previousIn = false;
+bool previousOut = false;
+
+unsigned long lastInTime = 0;
+unsigned long lastOutTime = 0;
+unsigned long gateOpenedAt = 0;
+
+bool detectIR(int pin) {
+
+  int value = digitalRead(pin);
+
+  if (IR_ACTIVE_LOW) {
+    return value == LOW;
+  }
+
+  return value == HIGH;
+}
+
+
+void openGate() {
+
+  gate.write(GATE_OPEN);
+  gateOpen = true;
+  gateOpenedAt = millis();
+
+  Serial.println("GATE OPEN");
+}
+
+void closeGate() {
+
+  gate.write(GATE_CLOSED);
+  gateOpen = false;
+
+  Serial.println("GATE CLOSED");
+}
+
+
+void checkEntry() {
+
+  bool currentIn = detectIR(IR_IN);
+
+  if (currentIn && !previousIn &&
+      millis() - lastInTime >= DEBOUNCE_TIME) {
+
+    lastInTime = millis();
+
+    if (occupiedCars < MAX_CAPACITY) {
+
+      occupiedCars++;
+
+      Serial.println("CAR ENTERED");
+      Serial.print("OCCUPIED: ");
+      Serial.println(occupiedCars);
+
+      digitalWrite(BUZZER_PIN, LOW);
+      openGate();
+
+    } else {
+
+      Serial.println("PARKING FULL!");
+
+      digitalWrite(BUZZER_PIN, HIGH);
+      closeGate();
+    }
+  }
+
+  previousIn = currentIn;
+}
+
+
+void checkExit() {
+
+  bool currentOut = detectIR(IR_OUT);
+
+  if (currentOut && !previousOut &&
+      millis() - lastOutTime >= DEBOUNCE_TIME) {
+
+    lastOutTime = millis();
+
+    if (occupiedCars > 0) {
+
+      occupiedCars--;
+
+      Serial.println("CAR EXITED");
+      Serial.print("OCCUPIED: ");
+      Serial.println(occupiedCars);
+
+      digitalWrite(BUZZER_PIN, LOW);
+      openGate();
+
+    } else {
+
+      Serial.println("PARKING ALREADY EMPTY");
+    }
+  }
+
+  previousOut = currentOut;
+}
+
+void checkBuzzer() {
+
+  bool entranceDetected = detectIR(IR_IN);
+
+  if (occupiedCars >= MAX_CAPACITY && entranceDetected) {
+    digitalWrite(BUZZER_PIN, HIGH);
+  } else {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+}
+
+
+void checkGateTimer() {
+
+  if (gateOpen &&
+      millis() - gateOpenedAt >= GATE_OPEN_TIME) {
+
+    closeGate();
+  }
+}
+
+
+void updateDisplay() {
+
+  int availableCars = MAX_CAPACITY - occupiedCars;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(15, 0);
+  display.println("SMART PARKING");
+
+  display.drawLine(0, 12, 128, 12, SSD1306_WHITE);
+
+  display.setCursor(0, 20);
+  display.print("OCCUPIED: ");
+  display.print(occupiedCars);
+  display.println("/2");
+
+  display.setCursor(0, 32);
+  display.print("AVAILABLE: ");
+  display.print(availableCars);
+  display.println("/2");
+
+  display.setCursor(0, 45);
+
+  if (occupiedCars == 2) {
+    display.println("PARKING FULL");
+  } else if (occupiedCars == 0) {
+    display.println("ALL SLOTS FREE");
+  } else {
+    display.println("SPACE AVAILABLE");
+  }
+
+  display.setCursor(0, 56);
+  display.print("GATE: ");
+  display.println(gateOpen ? "OPEN" : "CLOSED");
+
+  display.display();
+}
+
+const char webpage[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Parking Dashboard</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px;
+  font-family: Arial, sans-serif;
+  background: #101827;
+  color: white;
+}
+
+.container {
+  max-width: 800px;
+  margin: auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+h1 {
+  font-size: 25px;
+}
+
+.online {
+  color: #4ade80;
+  font-size: 14px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px;
+  margin-top: 25px;
+}
+
+.card {
+  background: #1e293b;
+  padding: 22px;
+  border-radius: 14px;
+}
+
+.card h3 {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.number {
+  font-size: 38px;
+  font-weight: bold;
+}
+
+.slots {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px;
+  margin-top: 25px;
+}
+
+.slot {
+  background: #1e293b;
+  padding: 25px 12px;
+  border-radius: 14px;
+  text-align: center;
+}
+
+.status {
+  font-weight: bold;
+  margin-top: 12px;
+}
+
+.free {
+  color: #4ade80;
+}
+
+.occupied {
+  color: #fb7185;
+}
+
+.info {
+  background: #1e293b;
+  margin-top: 20px;
+  padding: 20px;
+  border-radius: 14px;
+}
+
+.info p {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.footer {
+  text-align: center;
+  color: #94a3b8;
+  margin-top: 25px;
+  font-size: 12px;
+}
+
+@media(max-width: 450px) {
+  body { padding: 12px; }
+  h1 { font-size: 20px; }
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1>SMART PARKING</h1>
+    <span class="online" id="connection">● CONNECTED</span>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <h3>OCCUPIED CARS</h3>
+      <div class="number" id="occupied">0 / 2</div>
+    </div>
+
+    <div class="card">
+      <h3>AVAILABLE SLOTS</h3>
+      <div class="number" id="available">2 / 2</div>
+    </div>
+  </div>
+
+  <h2>Parking Slots</h2>
+
+  <div class="slots">
+    <div class="slot">
+      <h3>SLOT 1</h3>
+      <div class="status free" id="slot1">FREE</div>
+    </div>
+
+    <div class="slot">
+      <h3>SLOT 2</h3>
+      <div class="status free" id="slot2">FREE</div>
+    </div>
+  </div>
+
+  <div class="info">
+    <h3>System Information</h3>
+
+    <p>
+      <span>Entry IR</span>
+      <b id="entry">CLEAR</b>
+    </p>
+
+    <p>
+      <span>Exit IR</span>
+      <b id="exit">CLEAR</b>
+    </p>
+
+    <p>
+      <span>Gate Status</span>
+      <b id="gate">CLOSED</b>
+    </p>
+
+    <p>
+      <span>Parking Status</span>
+      <b id="parking">AVAILABLE</b>
+    </p>
+  </div>
+
+  <div class="footer">
+    ESP32 LOCAL WEB SERVER | AUTO REFRESH: 1 SECOND
+  </div>
+
+</div>
+
+<script>
+async function updateDashboard() {
+
+  try {
+
+    const response = await fetch('/status');
+    if (!response.ok) throw new Error('Server error');
+
+    const data = await response.json();
+
+    document.getElementById('occupied').innerText =
+      data.occupied + ' / 2';
+
+    document.getElementById('available').innerText =
+      data.available + ' / 2';
+
+    document.getElementById('slot1').innerText =
+      data.occupied >= 1 ? 'OCCUPIED' : 'FREE';
+
+    document.getElementById('slot2').innerText =
+      data.occupied >= 2 ? 'OCCUPIED' : 'FREE';
+
+    document.getElementById('slot1').className =
+      'status ' + (data.occupied >= 1 ? 'occupied' : 'free');
+
+    document.getElementById('slot2').className =
+      'status ' + (data.occupied >= 2 ? 'occupied' : 'free');
+
+    document.getElementById('entry').innerText =
+      data.entry ? 'DETECTED' : 'CLEAR';
+
+    document.getElementById('exit').innerText =
+      data.exit ? 'DETECTED' : 'CLEAR';
+
+    document.getElementById('gate').innerText =
+      data.gate ? 'OPEN' : 'CLOSED';
+
+    document.getElementById('parking').innerText =
+      data.full ? 'PARKING FULL' : 'SPACE AVAILABLE';
+
+    document.getElementById('connection').innerText =
+      '● CONNECTED';
+
+  } catch(error) {
+
+    document.getElementById('connection').innerText =
+      '● DISCONNECTED';
+  }
+}
+
+updateDashboard();
+setInterval(updateDashboard, 1000);
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+  server.send_P(200, "text/html", webpage);
+}
+
+void handleStatus() {
+
+  int available = MAX_CAPACITY - occupiedCars;
+
+  String json = "{";
+
+  json += "\"occupied\":" + String(occupiedCars) + ",";
+  json += "\"available\":" + String(available) + ",";
+  json += "\"gate\":" + String(gateOpen ? 1 : 0) + ",";
+  json += "\"full\":" + String(occupiedCars >= MAX_CAPACITY ? 1 : 0) + ",";
+  json += "\"entry\":" + String(detectIR(IR_IN) ? 1 : 0) + ",";
+  json += "\"exit\":" + String(detectIR(IR_OUT) ? 1 : 0);
+
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+
+void connectWiFi() {
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+
+  int attempts = 0;
+
+  while (WiFi.status() != WL_CONNECTED &&
+         attempts < 40) {
+
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.println("WIFI CONNECTED!");
+
+    Serial.print("IP ADDRESS: ");
+    Serial.println(WiFi.localIP());
+
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/status", HTTP_GET, handleStatus);
+
+    server.begin();
+
+    Serial.println("WEB SERVER STARTED");
+
+    Serial.print("OPEN THIS ADDRESS: http://");
+    Serial.println(WiFi.localIP());
+
+  } else {
+
+    Serial.println("WIFI CONNECTION FAILED");
+    Serial.println("Check WiFi name and password.");
+  }
+}
+
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(IR_IN, INPUT);
+  pinMode(IR_OUT, INPUT);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+
+    Serial.println("OLED NOT FOUND");
+
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  gate.setPeriodHertz(50);
+  gate.attach(SERVO_PIN, 500, 2400);
+
+  closeGate();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(15, 20);
+  display.println("SMART PARKING");
+  display.setCursor(20, 35);
+  display.println("WIFI CONNECTING");
+  display.display();
+
+  connectWiFi();
+
+  display.clearDisplay();
+  display.setCursor(15, 20);
+  display.println("SMART PARKING");
+  display.setCursor(20, 35);
+  display.println(
+    WiFi.status() == WL_CONNECTED ?
+    "WEB SERVER READY" : "WIFI FAILED"
+  );
+  display.display();
+}
+
+
+void loop() {
+
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
+  }
+
+  checkEntry();
+  checkExit();
+
+  checkBuzzer();
+  checkGateTimer();
+
+  updateDisplay();
+
+  delay(20);
+}
